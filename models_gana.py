@@ -47,7 +47,7 @@ class RelationMetaLearner(nn.Module):
 
 
 class LSTM_attn(nn.Module):
-    def __init__(self, embed_size=100, n_hidden=200, out_size=100, layers=2):
+    def __init__(self, embed_size=100, n_hidden=200, out_size=100, layers=1):
         super(LSTM_attn, self).__init__()
         self.embed_size = embed_size
         self.n_hidden = n_hidden
@@ -83,6 +83,7 @@ class EmbeddingLearner(nn.Module):
         super(EmbeddingLearner, self).__init__()
 
     def forward(self, h, t, r, pos_num, norm):
+        norm = norm[:,:1,:,:]						# revise
         h = h - torch.sum(h * norm, -1, True) * norm
         t = t - torch.sum(t * norm, -1, True) * norm
         score = -torch.norm(h + r - t, 2, -1).squeeze(2)
@@ -123,33 +124,37 @@ class MetaR(nn.Module):
         self.attn_w = nn.Linear(self.embed_dim, 1)
 
         self.gate_w = nn.Linear(self.embed_dim, 1)
-        self.gate_b = nn.Parameter(torch.FloatTensor(self.embed_dim))
+        self.gate_b = nn.Parameter(torch.FloatTensor(1))
 
         init.xavier_normal_(self.gcn_w.weight)
         init.constant_(self.gcn_b, 0)
         init.xavier_normal_(self.attn_w.weight)
 
         self.symbol_emb.weight.requires_grad = False
+        self.h_norm = None
 
-        if parameter['dataset'] == 'Wiki-One':           
+        if parameter['dataset'] == 'Wiki-One':
             self.relation_learner = LSTM_attn(embed_size=50, n_hidden=100, out_size=50,layers=2)
         elif parameter['dataset'] == 'NELL-One':
-            self.relation_learner = LSTM_attn(embed_size=100, n_hidden=200, out_size=100, layers=2)
+            self.relation_learner = LSTM_attn(embed_size=100, n_hidden=450, out_size=100, layers=2)
         self.embedding_learner = EmbeddingLearner()
         self.loss_func = nn.MarginRankingLoss(self.margin)
         self.rel_q_sharing = dict()
-        self.batch_size = parameter['batch_size']
-        self.norm_vector = self.h_embedding[0]
-        self.norm_q_sharing = []
+        self.norm_q_sharing = dict()
 
 
-    def neighbor_encoder(self, connections, num_neighbors):
+    def neighbor_encoder(self, connections, num_neighbors, istest):
+        '''
+        connections: (batch, 200, 2)
+        num_neighbors: (batch,)
+        '''
         num_neighbors = num_neighbors.unsqueeze(1)
         relations = connections[:,:,0].squeeze(-1)
         entities = connections[:,:,1].squeeze(-1)
+        entself = connections[:,0,0].squeeze(-1)
         rel_embeds = self.dropout(self.symbol_emb(relations)) # (batch, 200, embed_dim)
         ent_embeds = self.dropout(self.symbol_emb(entities)) # (batch, 200, embed_dim)
-        entself_embeds = ent_embeds
+        entself_embeds = self.dropout(self.symbol_emb(entself))
 
         concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1) # (batch, 200, 2*embed_dim)
 
@@ -157,14 +162,12 @@ class MetaR(nn.Module):
         out = F.leaky_relu(out)
         attn_out = self.attn_w(out)
         attn_weight = F.softmax(attn_out, dim=1)
-
         out_attn = torch.bmm(out.transpose(1,2), attn_weight)
         out_attn = out_attn.squeeze(2)
-
-        gate_tem = self.gate_w(out_attn) + self.gate_b
-        gate = torch.sigmoid(gate_tem)
-        out_neighbor = torch.mul(out_attn, gate)
-        out_neighbor = out_neighbor + entself_embeds
+        gate_tmp = self.gate_w(out_attn) + self.gate_b
+        gate = torch.sigmoid(gate_tmp)
+        out_neigh = torch.mul(out_attn, gate)
+        out_neighbor = out_neigh + torch.mul(entself_embeds,1.0-gate)
 
         return out_neighbor
 
@@ -174,50 +177,45 @@ class MetaR(nn.Module):
         pos_neg_e2 = torch.cat([positive[:, :, 1, :],
                                 negative[:, :, 1, :]], 1).unsqueeze(2)
         return pos_neg_e1, pos_neg_e2
-  
 
 
-
-    def forward(self, task, iseval=False, curr_rel='', support_meta=None):
+    def forward(self, task, iseval=False, curr_rel='', support_meta=None, istest=False):
         # transfer task string into embedding
         support, support_negative, query, negative = [self.embedding(t) for t in task]
-
-
+        norm_vector = self.h_embedding(task[0])
         few = support.shape[1]              # num of few
         num_sn = support_negative.shape[1]  # num of support negative
         num_q = query.shape[1]              # num of query
         num_n = negative.shape[1]           # num of query negative
 
         support_left_connections, support_left_degrees, support_right_connections, support_right_degrees = support_meta[0]
-        support_left = self.neighbor_encoder(support_left_connections, support_left_degrees)
-        support_right = self.neighbor_encoder(support_right_connections, support_right_degrees)
+        support_left = self.neighbor_encoder(support_left_connections, support_left_degrees, istest)
+        support_right = self.neighbor_encoder(support_right_connections, support_right_degrees, istest)
         support_few = torch.cat((support_left, support_right), dim=-1)
         support_few = support_few.view(support_few.shape[0], 2, self.embed_dim)
 
         for i in range(self.few-1):
             support_left_connections, support_left_degrees, support_right_connections, support_right_degrees = support_meta[i+1]
-            support_left = self.neighbor_encoder(support_left_connections, support_left_degrees)
-            support_right = self.neighbor_encoder(support_right_connections, support_right_degrees)
-            support_pair = torch.cat((support_left, support_right), dim=-1)
+            support_left = self.neighbor_encoder(support_left_connections, support_left_degrees, istest)
+            support_right = self.neighbor_encoder(support_right_connections, support_right_degrees, istest)
+            support_pair = torch.cat((support_left, support_right), dim=-1)  # tanh
             support_pair = support_pair.view(support_pair.shape[0], 2, self.embed_dim)
-
             support_few = torch.cat((support_few, support_pair), dim=1)
         support_few = support_few.view(support_few.shape[0], self.few, 2, self.embed_dim)
-
         rel = self.relation_learner(support_few)
         rel.retain_grad()
+
+        # relation for support
         rel_s = rel.expand(-1, few+num_sn, -1, -1)
-
-        self.norm_vector.retain_grad()
-
         if iseval and curr_rel != '' and curr_rel in self.rel_q_sharing.keys():
             rel_q = self.rel_q_sharing[curr_rel]
+
         else:
             if not self.abla:
                 # split on e1/e2 and concat on pos/neg
                 sup_neg_e1, sup_neg_e2 = self.split_concat(support, support_negative)
 
-                p_score, n_score = self.embedding_learner(sup_neg_e1, sup_neg_e2, rel_s, few, self.norm_vector)
+                p_score, n_score = self.embedding_learner(sup_neg_e1, sup_neg_e2, rel_s, few, norm_vector)	# revise norm_vector
 
                 y = torch.Tensor([1]).to(self.device)
                 self.zero_grad()
@@ -225,21 +223,20 @@ class MetaR(nn.Module):
                 loss.backward(retain_graph=True)
                 grad_meta = rel.grad
                 rel_q = rel - self.beta*grad_meta
-                grad_norm = self.norm_vector.grad
-                self.norm_vector = self.norm_vector - self.beta*grad_norm
-
+                norm_q = norm_vector - self.beta*grad_meta				# hyper-plane update
             else:
                 rel_q = rel
-            
-            self.rel_q_sharing[curr_rel]  = rel_q
-            if len(self.norm_q_sharing)>0:
-                self.norm_q_sharing.pop()
-            self.norm_q_sharing.append(norm_q)
+                norm_q = norm_vector
+
+            self.rel_q_sharing[curr_rel] = rel_q
+            self.h_norm = norm_vector.mean(0)
+            self.h_norm = self.h_norm.unsqueeze(0)
 
         rel_q = rel_q.expand(-1, num_q + num_n, -1, -1)
 
         que_neg_e1, que_neg_e2 = self.split_concat(query, negative)  # [bs, nq+nn, 1, es]
-        p_score, n_score = self.embedding_learner(que_neg_e1, que_neg_e2, rel_q, num_q, self.norm_vector)
+        if iseval:
+            norm_q = self.h_norm
+        p_score, n_score = self.embedding_learner(que_neg_e1, que_neg_e2, rel_q, num_q, norm_q)
 
         return p_score, n_score
-
