@@ -149,9 +149,9 @@ class MetaR(nn.Module):
         num_neighbors: (batch,)
         '''
         num_neighbors = num_neighbors.unsqueeze(1)
-        relations = connections[:,:,0].squeeze(-1)
-        entities = connections[:,:,1].squeeze(-1)
-        entself = connections[:,0,0].squeeze(-1)
+        entity_self = connections[:,:,0].squeeze(-1)
+        relations = connections[:,:,1].squeeze(-1)
+        entities = connections[:,:,2].squeeze(-1)
         rel_embeds = self.dropout(self.symbol_emb(relations)) # (batch, 200, embed_dim)
         ent_embeds = self.dropout(self.symbol_emb(entities)) # (batch, 200, embed_dim)
         entself_embeds = self.dropout(self.symbol_emb(entself))
