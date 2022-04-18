@@ -140,15 +140,15 @@ class Trainer:
 
     def build_connection(self, max_=100):
 
-        self.connections = (np.ones((self.num_ents, max_, 2)) * self.pad_id).astype(int)
+        self.connections = (np.ones((self.num_ents, max_, 3)) * self.pad_id).astype(int)
         self.e1_rele2 = defaultdict(list)
         self.e1_degrees = defaultdict(int)
         with open(self.data_path + '/path_graph') as f:
             lines = f.readlines()
             for line in tqdm(lines):
                 e1, rel, e2 = line.rstrip().split()
-                self.e1_rele2[e1].append((self.symbol2id[rel], self.symbol2id[e2]))
-                self.e1_rele2[e2].append((self.symbol2id[rel + '_inv'], self.symbol2id[e1]))
+                self.e1_rele2[e1].append((self.symbol2id[e1], self.symbol2id[rel], self.symbol2id[e2]))
+                self.e1_rele2[e2].append((self.symbol2id[e2], self.symbol2id[rel + '_inv'], self.symbol2id[e1]))
 
         degrees = {}
         for ent, id_ in self.ent2id.items():
@@ -161,6 +161,7 @@ class Trainer:
             for idx, _ in enumerate(neighbors):
                 self.connections[id_, idx, 0] = _[0]
                 self.connections[id_, idx, 1] = _[1]
+                self.connections[id_, idx, 2] = _[2]
 
         return degrees
 
