@@ -1,4 +1,4 @@
-from models_gana import *
+from models_gana_origin import *
 from tensorboardX import SummaryWriter
 import os
 import sys
@@ -441,4 +441,3 @@ class Trainer:
             all_t, all_data['MRR'], all_data['Hits@10'], all_data['Hits@5'], all_data['Hits@1']))
 
         return all_data
-
