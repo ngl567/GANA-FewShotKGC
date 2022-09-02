@@ -1,4 +1,4 @@
-from trainer_gana import *
+from trainer_gann_origin import *
 from params import *
 from data_loader import *
 import json
@@ -77,4 +77,3 @@ if __name__ == '__main__':
             trainer.eval_by_relation(istest=False)
         else:
             trainer.eval(istest=False)
-
