@@ -47,18 +47,22 @@ class RelationMetaLearner(nn.Module):
 
 
 class LSTM_attn(nn.Module):
-    def __init__(self, embed_size=100, n_hidden=200, out_size=100, layers=1):
+    def __init__(self, embed_size=100, n_hidden=200, out_size=100, layers=1, dropout=0.5):
         super(LSTM_attn, self).__init__()
         self.embed_size = embed_size
         self.n_hidden = n_hidden
         self.out_size = out_size
         self.layers = layers
-        self.lstm = nn.LSTM(self.embed_size*2, self.n_hidden, self.layers, bidirectional=True)
+        self.dropout = dropout
+        self.lstm = nn.LSTM(self.embed_size*2, self.n_hidden, self.layers, bidirectional=True, dropout=self.dropout)
+        #self.gru = nn.GRU(self.embed_size*2, self.n_hidden, self.layers, bidirectional=True)
         self.out = nn.Linear(self.n_hidden*2*self.layers, self.out_size)
 
     def attention_net(self, lstm_output, final_state):
         hidden = final_state.view(-1, self.n_hidden*2, self.layers)
-        attn_weight = torch.bmm(lstm_output, hidden).squeeze(2)
+        attn_weight = torch.bmm(lstm_output, hidden).squeeze(2).cuda()
+        #batchnorm = nn.BatchNorm1d(5, affine=False).cuda()
+        #attn_weight = batchnorm(attn_weight)
         soft_attn_weight = F.softmax(attn_weight, 1)
         context = torch.bmm(lstm_output.transpose(1,2), soft_attn_weight)
         context = context.view(-1, self.n_hidden*2*self.layers)
@@ -70,12 +74,12 @@ class LSTM_attn(nn.Module):
         input = inputs.permute(1, 0, 2)
         hidden_state = Variable(torch.zeros(self.layers*2, size[0], self.n_hidden)).cuda()
         cell_state = Variable(torch.zeros(self.layers*2, size[0], self.n_hidden)).cuda()
-        output, (final_hidden_state, final_cell_state) = self.lstm(input, (hidden_state, cell_state))
+        output, (final_hidden_state, final_cell_state) = self.lstm(input, (hidden_state, cell_state))  # LSTM
         output = output.permute(1, 0, 2)
-        attn_output = self.attention_net(output, final_hidden_state)
+        attn_output = self.attention_net(output, final_cell_state)      # change log
 
         outputs = self.out(attn_output)
-        return outputs.view(size[0], 1, 1, self.out_size)
+        return outputs.view(size[0], 1, 1, self.out_size)    
 
 
 class EmbeddingLearner(nn.Module):
@@ -113,53 +117,60 @@ class MetaR(nn.Module):
         self.few = parameter['few']
         self.dropout = nn.Dropout(0.5)
         self.symbol_emb = nn.Embedding(num_symbols + 1, self.embed_dim, padding_idx = num_symbols)
+        self.num_hidden1 = 500
+        self.num_hidden2 = 200
+        self.lstm_dim = parameter['lstm_hiddendim']
+        self.lstm_layer = parameter['lstm_layers']
 
         self.symbol_emb.weight.data.copy_(torch.from_numpy(embed))
 
         self.h_emb = nn.Embedding(self.num_rel, self.embed_dim)
         init.xavier_uniform_(self.h_emb.weight)
 
-        self.gcn_w = nn.Linear(2*self.embed_dim, self.embed_dim)
-        self.gcn_b = nn.Parameter(torch.FloatTensor(self.embed_dim))
-        self.attn_w = nn.Linear(self.embed_dim, 1)
+        self.gcn_w = nn.Linear(2*self.embed_dim, self.embed_dim)       # change log
+        self.gcn_b = nn.Parameter(torch.FloatTensor(self.embed_dim))   # change log
+        self.attn_w = nn.Linear(self.embed_dim, 1)                                                       
 
         self.gate_w = nn.Linear(self.embed_dim, 1)
         self.gate_b = nn.Parameter(torch.FloatTensor(1))
 
-        init.xavier_normal_(self.gcn_w.weight)
-        init.constant_(self.gcn_b, 0)
+        init.xavier_normal_(self.gcn_w.weight)                         # change log
+        init.constant_(self.gcn_b, 0)                                  # change log
         init.xavier_normal_(self.attn_w.weight)
 
         self.symbol_emb.weight.requires_grad = False
         self.h_norm = None
 
         if parameter['dataset'] == 'Wiki-One':
-            self.relation_learner = LSTM_attn(embed_size=50, n_hidden=100, out_size=50,layers=2)
+            self.relation_learner = LSTM_attn(embed_size=50, n_hidden=100, out_size=50,layers=2, dropout=0.5)
         elif parameter['dataset'] == 'NELL-One':
-            self.relation_learner = LSTM_attn(embed_size=100, n_hidden=450, out_size=100, layers=2)
+            self.relation_learner = LSTM_attn(embed_size=100, n_hidden=self.lstm_dim, out_size=100, layers=self.lstm_layer, dropout=self.dropout_p)
         self.embedding_learner = EmbeddingLearner()
         self.loss_func = nn.MarginRankingLoss(self.margin)
         self.rel_q_sharing = dict()
         self.norm_q_sharing = dict()
 
 
-    def neighbor_encoder(self, connections, num_neighbors, istest):
+    def neighbor_encoder(self, connections, num_neighbors, iseval):
         '''
         connections: (batch, 200, 2)
         num_neighbors: (batch,)
         '''
         num_neighbors = num_neighbors.unsqueeze(1)
-        entity_self = connections[:,:,0].squeeze(-1)
+        entity_self = connections[:,0,0].squeeze(-1)
         relations = connections[:,:,1].squeeze(-1)
         entities = connections[:,:,2].squeeze(-1)
         rel_embeds = self.dropout(self.symbol_emb(relations)) # (batch, 200, embed_dim)
         ent_embeds = self.dropout(self.symbol_emb(entities)) # (batch, 200, embed_dim)
-        entself_embeds = self.dropout(self.symbol_emb(entself))
+        entself_embeds = self.dropout(self.symbol_emb(entity_self))
+        if not iseval:
+            entself_embeds = entself_embeds.squeeze(1)
 
         concat_embeds = torch.cat((rel_embeds, ent_embeds), dim=-1) # (batch, 200, 2*embed_dim)
 
-        out = self.gcn_w(concat_embeds) + self.gcn_b
-        out = F.leaky_relu(out)
+        out = self.gcn_w(concat_embeds) + self.gcn_b       # out gcn former change log
+        out = F.leaky_relu(out)                            # out gcn former change log
+
         attn_out = self.attn_w(out)
         attn_weight = F.softmax(attn_out, dim=1)
         out_attn = torch.bmm(out.transpose(1,2), attn_weight)
@@ -167,7 +178,7 @@ class MetaR(nn.Module):
         gate_tmp = self.gate_w(out_attn) + self.gate_b
         gate = torch.sigmoid(gate_tmp)
         out_neigh = torch.mul(out_attn, gate)
-        out_neighbor = out_neigh + torch.mul(entself_embeds,1.0-gate)
+        out_neighbor = out_neigh + torch.mul(entself_embeds, 1.0-gate)
 
         return out_neighbor
 
@@ -189,15 +200,15 @@ class MetaR(nn.Module):
         num_n = negative.shape[1]           # num of query negative
 
         support_left_connections, support_left_degrees, support_right_connections, support_right_degrees = support_meta[0]
-        support_left = self.neighbor_encoder(support_left_connections, support_left_degrees, istest)
-        support_right = self.neighbor_encoder(support_right_connections, support_right_degrees, istest)
+        support_left = self.neighbor_encoder(support_left_connections, support_left_degrees, iseval)
+        support_right = self.neighbor_encoder(support_right_connections, support_right_degrees, iseval)
         support_few = torch.cat((support_left, support_right), dim=-1)
         support_few = support_few.view(support_few.shape[0], 2, self.embed_dim)
 
         for i in range(self.few-1):
             support_left_connections, support_left_degrees, support_right_connections, support_right_degrees = support_meta[i+1]
-            support_left = self.neighbor_encoder(support_left_connections, support_left_degrees, istest)
-            support_right = self.neighbor_encoder(support_right_connections, support_right_degrees, istest)
+            support_left = self.neighbor_encoder(support_left_connections, support_left_degrees, iseval)
+            support_right = self.neighbor_encoder(support_right_connections, support_right_degrees, iseval)
             support_pair = torch.cat((support_left, support_right), dim=-1)  # tanh
             support_pair = support_pair.view(support_pair.shape[0], 2, self.embed_dim)
             support_few = torch.cat((support_few, support_pair), dim=1)
@@ -219,7 +230,9 @@ class MetaR(nn.Module):
 
                 y = torch.Tensor([1]).to(self.device)
                 self.zero_grad()
+                #normalization = 0.0001 * (torch.sum(norm_vector**2) + torch.sum(rel_s**2))
                 loss = self.loss_func(p_score, n_score, y)
+                #loss = self.loss_func(p_score, n_score, y) + normalization
                 loss.backward(retain_graph=True)
                 grad_meta = rel.grad
                 rel_q = rel - self.beta*grad_meta
