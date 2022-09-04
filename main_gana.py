@@ -1,4 +1,4 @@
-from trainer_gann_origin import *
+from trainer_gann import *
 from params import *
 from data_loader import *
 import json
