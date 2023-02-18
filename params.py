@@ -35,7 +35,7 @@ def get_params():
     args.add_argument("-state_dir", "--state_dir", default="state", type=str)
     args.add_argument("-eval_ckpt", "--eval_ckpt", default=None, type=str)
     args.add_argument("-eval_by_rel", "--eval_by_rel", default=False, type=bool)
-    args.add_argument("-embed_model", "--embed_model", default="TransE", type=str)  # ["NELL-One", "Wiki-One"]
+    args.add_argument("-embed_model", "--embed_model", default="TransE", type=str)
     args.add_argument("-max_neighbor", "--max_neighbor", default=50, type=int)
     args.add_argument("-lstm_dim", "--lstm_hiddendim", default=600, type=int)
     args.add_argument("-lstm_layer", "--lstm_layers", default=2, type=int)
